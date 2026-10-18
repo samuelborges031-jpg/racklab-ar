@@ -1,0 +1,1 @@
+Coloque aqui os modelos .glb gerados pelo RackLab (botão "Baixar modelo do QR"). O nome do arquivo é o código AR do projeto, por exemplo K7P2QX.glb.

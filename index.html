@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>RackLab AR</title>
+<meta name="theme-color" content="#0E1317">
+<script type="module" src="https://cdn.jsdelivr.net/npm/@google/model-viewer@4.4.0/dist/model-viewer.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{--bg:#0E1317;--panel:#151C22;--ink:#E2E8ED;--muted:#93A0AB;--line:#2B353E;--accent:#4BB0CC;--warn:#E3A13E}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+  body{display:flex;flex-direction:column;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+  header{display:flex;align-items:baseline;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
+  header b{font-size:22px;letter-spacing:.02em} header b i{font-style:normal;color:var(--accent)}
+  header span{font:12px ui-monospace,Menlo,monospace;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-left:auto}
+  #info{padding:10px 16px}
+  #info h1{margin:0;font-size:18px;font-weight:600}
+  #info p{margin:2px 0 0;color:var(--muted);font-size:13px}
+  model-viewer{flex:1;width:100%;min-height:300px;background:radial-gradient(circle at 50% 40%,#1E2830,#0E1317)}
+  .arbtn{position:absolute;left:50%;bottom:24px;transform:translateX(-50%);border:0;border-radius:28px;background:var(--accent);color:#06171D;font:600 17px system-ui,sans-serif;padding:14px 26px;box-shadow:0 6px 20px rgba(0,0,0,.4)}
+  .msg{margin:16px;padding:14px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+  .msg.warn{border-color:var(--warn);color:var(--warn)}
+  .pick{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:0 16px 16px}
+  .pick label{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:10px 18px;border-radius:8px;background:var(--accent);color:#06171D;font-weight:600;cursor:pointer}
+  .pick input{display:none}
+  #noar{display:none;margin:0 16px 16px;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+<header><b>Rack<i>Lab</i></b><span>Realidade aumentada</span></header>
+<div id="info"><h1 id="titulo">Visualizador AR</h1><p id="sub">Escaneie o QR Code de um projeto ou abra um modelo.</p></div>
+<div id="aviso"></div>
+<model-viewer id="mv" ar ar-modes="webxr scene-viewer quick-look" ar-scale="fixed" ar-placement="floor"
+  camera-controls touch-action="pan-y" shadow-intensity="1" exposure="1" environment-image="neutral" hidden>
+  <button slot="ar-button" class="arbtn">Ver no seu espaço</button>
+</model-viewer>
+<p id="noar">Este aparelho não abriu a realidade aumentada. No Android, é preciso o Chrome e o Google Play Services para AR (ARCore).</p>
+<div class="pick" id="pick" hidden>
+  <label>Abrir modelo (.zip ou .glb)<input type="file" id="arq" accept=".zip,.glb,model/gltf-binary,application/zip"></label>
+</div>
+<script>
+(function(){
+  const mv=document.getElementById("mv"), q=new URLSearchParams(location.search);
+  const code=(q.get("m")||"").toUpperCase().replace(/[^A-Z0-9_-]/g,""), nome=(q.get("n")||"").slice(0,60);
+  const aviso=(t,warn)=>{ document.getElementById("aviso").innerHTML='<div class="msg'+(warn?" warn":"")+'"></div>'; document.querySelector("#aviso .msg").textContent=t; };
+  const mostrar=src=>{ mv.hidden=false; mv.src=src; };
+  mv.addEventListener("load",()=>{ document.getElementById("aviso").innerHTML=""; if(!mv.canActivateAR) document.getElementById("noar").style.display="block"; });
+  mv.addEventListener("error",()=>{ aviso(code?"O modelo "+code+".glb ainda não está na pasta modelos/ do visualizador. Envie o arquivo gerado pelo RackLab (Baixar modelo do QR) e tente de novo em alguns minutos.":"Não foi possível abrir o modelo.",true); mv.hidden=true; });
+  mv.addEventListener("ar-status",e=>{ if(e.detail.status==="failed") document.getElementById("noar").style.display="block"; });
+
+  if(code){
+    document.getElementById("titulo").textContent=nome||("Projeto "+code);
+    document.getElementById("sub").textContent="Código AR "+code+" · toque em Ver no seu espaço e aponte para o chão";
+    document.title=(nome||code)+" · RackLab AR";
+    aviso("Carregando modelo…");
+    /* o parâmetro evita que o celular mostre uma versão antiga depois que o modelo é substituído no repositório */
+    mostrar("modelos/"+encodeURIComponent(code)+".glb?v="+Math.floor(Date.now()/60000));
+    return;
+  }
+  document.getElementById("pick").hidden=false;
+  document.getElementById("arq").onchange=async ev=>{
+    const f=ev.target.files[0]; if(!f) return;
+    try{
+      let blob=f;
+      if(/\.zip$/i.test(f.name)||f.type.includes("zip")){
+        const z=await JSZip.loadAsync(f); const ent=Object.values(z.files).find(x=>!x.dir&&/\.glb$/i.test(x.name));
+        if(!ent) throw new Error("sem .glb");
+        blob=new Blob([await ent.async("uint8array")],{type:"model/gltf-binary"});
+        document.getElementById("titulo").textContent=f.name.replace(/\.zip$/i,"");
+      } else document.getElementById("titulo").textContent=f.name.replace(/\.glb$/i,"");
+      document.getElementById("sub").textContent="Toque em Ver no seu espaço e aponte para o chão";
+      mostrar(URL.createObjectURL(blob));
+    }catch(e){ aviso("Arquivo inválido. Use o .zip ou .glb gerado pelo RackLab.",true); }
+  };
+})();
+</script>
+</body>
+</html>
