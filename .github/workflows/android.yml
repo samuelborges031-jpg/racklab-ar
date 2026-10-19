@@ -25,7 +25,21 @@ jobs:
           gradle-version: "8.7"
 
       - name: Compilar APK
-        run: gradle -p android assembleRelease --stacktrace --no-daemon
+        run: |
+          set -o pipefail
+          gradle -p android assembleRelease --no-daemon --console=plain 2>&1 | tee build.log
+
+      - name: Guardar erros da compilação (para análise)
+        if: failure()
+        run: |
+          mkdir -p ci
+          { echo "build ${GITHUB_RUN_NUMBER} $(date -u)"; grep -E "^e: |^w: .*\.kt|What went wrong|Could not|error:|FAILED|Caused by|> " build.log | head -150; echo "-----"; tail -80 build.log; } > ci/ultimo-erro.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci/ultimo-erro.txt
+          git commit -m "Log de erro do build ${GITHUB_RUN_NUMBER}" || exit 0
+          git pull --rebase origin main
+          git push origin HEAD:main
 
       - uses: actions/upload-artifact@v4
         with:
