@@ -47,7 +47,14 @@
   const aviso=(t,warn)=>{ document.getElementById("aviso").innerHTML='<div class="msg'+(warn?" warn":"")+'"></div>'; document.querySelector("#aviso .msg").textContent=t; };
   const mostrar=src=>{ mv.hidden=false; mv.src=src; };
   mv.addEventListener("load",()=>{ document.getElementById("aviso").innerHTML=""; if(!mv.canActivateAR) document.getElementById("noar").style.display="block"; });
-  mv.addEventListener("error",()=>{ aviso(code?"O modelo "+code+".glb ainda não está na pasta modelos/ do visualizador. Envie o arquivo gerado pelo RackLab (Baixar modelo do QR) e tente de novo em alguns minutos.":"Não foi possível abrir o modelo.",true); mv.hidden=true; });
+  /* modelo ainda não publicado: tenta de novo sozinho por alguns minutos (a publicação automática leva de 2 a 5 min) */
+  let tent=0; const MAXT=15;
+  mv.addEventListener("error",()=>{ mv.hidden=true;
+    if(!code){ aviso("Não foi possível abrir o modelo.",true); return; }
+    if(tent<MAXT){ tent++; aviso("O modelo "+code+" ainda está sendo publicado. Tentando de novo em 20 s ("+tent+" de "+MAXT+")…");
+      setTimeout(()=>mostrar("modelos/"+encodeURIComponent(code)+".glb?t="+Date.now()),20000); return; }
+    aviso("O modelo "+code+" não foi publicado. No RackLab, abra o projeto, vá em Realidade aumentada e toque em Publicar no AR. Enquanto isso, você pode abrir um .zip ou .glb abaixo.",true);
+    document.getElementById("pick").hidden=false; });
   mv.addEventListener("ar-status",e=>{ if(e.detail.status==="failed") document.getElementById("noar").style.display="block"; });
 
   if(code){
@@ -57,9 +64,7 @@
     aviso("Carregando modelo…");
     /* o parâmetro evita que o celular mostre uma versão antiga depois que o modelo é substituído no repositório */
     mostrar("modelos/"+encodeURIComponent(code)+".glb?v="+Math.floor(Date.now()/60000));
-    return;
-  }
-  document.getElementById("pick").hidden=false;
+  } else document.getElementById("pick").hidden=false;
   document.getElementById("arq").onchange=async ev=>{
     const f=ev.target.files[0]; if(!f) return;
     try{
