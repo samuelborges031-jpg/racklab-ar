@@ -1,0 +1,67 @@
+build 2 Mon Oct 19 00:06:35 UTC 2026
+> Task :app:buildKotlinToolingMetadata
+> Task :app:checkKotlinGradlePluginConfigurationErrors
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preReleaseBuild UP-TO-DATE
+> Task :app:generateReleaseResValues
+> Task :app:checkReleaseAarMetadata
+> Task :app:mapReleaseSourceSetPaths
+> Task :app:generateReleaseResources
+> Task :app:packageReleaseResources
+> Task :app:mergeReleaseResources
+> Task :app:createReleaseCompatibleScreenManifests
+> Task :app:extractDeepLinksRelease
+> Task :app:parseReleaseLocalResources
+> Task :app:processReleaseMainManifest FAILED
+	Suggestion: add 'tools:replace="android:value"' to <meta-data> element at AndroidManifest.xml:16:9-81 to override.
+* What went wrong:
+> Manifest merger failed : Attribute meta-data#com.google.ar.core@value value=(required) from AndroidManifest.xml:16:54-78
+  	Suggestion: add 'tools:replace="android:value"' to <meta-data> element at AndroidManifest.xml:16:9-81 to override.
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+BUILD FAILED in 14s
+-----
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.7/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :app:buildKotlinToolingMetadata
+> Task :app:checkKotlinGradlePluginConfigurationErrors
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preReleaseBuild UP-TO-DATE
+> Task :app:generateReleaseResValues
+> Task :app:checkReleaseAarMetadata
+> Task :app:mapReleaseSourceSetPaths
+> Task :app:generateReleaseResources
+> Task :app:packageReleaseResources
+> Task :app:mergeReleaseResources
+> Task :app:createReleaseCompatibleScreenManifests
+> Task :app:extractDeepLinksRelease
+> Task :app:parseReleaseLocalResources
+
+> Task :app:processReleaseMainManifest FAILED
+/home/runner/work/racklab-ar/racklab-ar/android/app/src/main/AndroidManifest.xml:16:54-78 Error:
+	Attribute meta-data#com.google.ar.core@value value=(required) from AndroidManifest.xml:16:54-78
+	is also present at [io.github.sceneview:arsceneview:2.2.1] AndroidManifest.xml:19:13-37 value=(optional).
+	Suggestion: add 'tools:replace="android:value"' to <meta-data> element at AndroidManifest.xml:16:9-81 to override.
+
+See https://developer.android.com/r/studio-ui/build/manifest-merger for more information about the manifest merger.
+
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run-1792368384110.json
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:processReleaseMainManifest'.
+> Manifest merger failed : Attribute meta-data#com.google.ar.core@value value=(required) from AndroidManifest.xml:16:54-78
+  	is also present at [io.github.sceneview:arsceneview:2.2.1] AndroidManifest.xml:19:13-37 value=(optional).
+  	Suggestion: add 'tools:replace="android:value"' to <meta-data> element at AndroidManifest.xml:16:9-81 to override.
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 14s
+12 actionable tasks: 12 executed
