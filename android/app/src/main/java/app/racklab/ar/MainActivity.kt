@@ -19,15 +19,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import com.google.ar.core.Anchor
 import com.google.ar.core.AugmentedImage
 import com.google.ar.core.AugmentedImageDatabase
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
-import com.google.ar.core.Pose
 import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ARSceneView
-import io.github.sceneview.ar.node.AnchorNode
+import io.github.sceneview.ar.node.AugmentedImageNode
 import io.github.sceneview.node.ModelNode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -37,13 +35,14 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
-import kotlin.math.sqrt
 
 /**
  * RackLab AR
  * - Baixa do site a lista de etiquetas (alvos.json), a imagem de cada etiqueta e o modelo 3D.
  * - O ARCore reconhece as etiquetas (Augmented Images) e o objeto aparece em pé sobre a etiqueta,
- *   com a frente voltada para a borda de baixo dela, e continua no lugar quando a etiqueta sai da tela.
+ *   com a frente voltada para a borda de baixo dela.
+ * - O objeto fica TRAVADO na etiqueta: a cada quadro da câmera ele segue a posição e o giro dela.
+ *   Se a etiqueta for movida, o objeto vai junto; se ela sair da tela, o objeto fica na última posição vista.
  * - Várias etiquetas na mesma sala funcionam ao mesmo tempo.
  * - O QR da etiqueta abre o app direto (App Links); o código do link vira destaque na tela.
  */
@@ -52,13 +51,12 @@ class MainActivity : AppCompatActivity() {
     companion object {
         const val BASE = "https://racklab-ar.netlify.app/"
         const val TAG = "RackLabAR"
-        /** Se a etiqueta se moveu mais que isso (m) desde a última âncora, reposiciona o objeto. */
-        const val REANCHOR_DIST = 0.03f
     }
 
     data class Alvo(val codigo: String, val nome: String, val tipo: String, val largura: Float, val bitmap: Bitmap)
 
-    private class Colocado(val anchorNode: AnchorNode, var pose: Pose, var modelo: ModelNode? = null, var carregando: Boolean = false)
+    /** Objeto preso a uma etiqueta: o AugmentedImageNode copia a pose da etiqueta a cada quadro. */
+    private class Colocado(val node: AugmentedImageNode, var modelo: ModelNode? = null, var carregando: Boolean = false, var seguindo: Boolean = true)
 
     private lateinit var root: FrameLayout
     private lateinit var status: TextView
@@ -181,31 +179,25 @@ class MainActivity : AppCompatActivity() {
     private fun aoAtualizar(frame: Frame) {
         val sv = sceneView ?: return
         for (img in frame.getUpdatedTrackables(AugmentedImage::class.java)) {
-            if (img.trackingState != TrackingState.TRACKING || img.trackingMethod != AugmentedImage.TrackingMethod.FULL_TRACKING) continue
+            if (img.trackingState != TrackingState.TRACKING) continue
             val cod = img.name
-            val pose = img.centerPose
-            val atual = colocados[cod]
-            if (atual == null) {
-                val anchor: Anchor = img.createAnchor(pose)
-                val node = AnchorNode(sv.engine, anchor)
-                sv.addChildNode(node)
-                val c = Colocado(node, pose)
-                colocados[cod] = c
-                carregarModelo(cod, c)
-                atualizarTextos()
-            } else if (distancia(atual.pose, pose) > REANCHOR_DIST) {
-                // etiqueta vista melhor ou movida: reposiciona o objeto em cima dela
-                val velha = atual.anchorNode.anchor
-                atual.anchorNode.anchor = img.createAnchor(pose)
-                velha.detach()
-                atual.pose = pose
-            }
+            if (colocados.containsKey(cod)) continue // já está preso: o próprio nó acompanha a etiqueta
+            if (img.trackingMethod != AugmentedImage.TrackingMethod.FULL_TRACKING) continue
+            lateinit var c: Colocado
+            val node = AugmentedImageNode(
+                engine = sv.engine,
+                augmentedImage = img,
+                onTrackingMethodChanged = { m ->
+                    c.seguindo = m == AugmentedImage.TrackingMethod.FULL_TRACKING
+                    runOnUiThread { atualizarTextos() }
+                }
+            )
+            c = Colocado(node)
+            sv.addChildNode(node) // filho direto da cena: a cena atualiza a pose dele a cada quadro
+            colocados[cod] = c
+            carregarModelo(cod, c)
+            atualizarTextos()
         }
-    }
-
-    private fun distancia(a: Pose, b: Pose): Float {
-        val dx = a.tx() - b.tx(); val dy = a.ty() - b.ty(); val dz = a.tz() - b.tz()
-        return sqrt(dx * dx + dy * dy + dz * dz)
     }
 
     private fun carregarModelo(cod: String, c: Colocado) {
@@ -220,7 +212,7 @@ class MainActivity : AppCompatActivity() {
                 val inst = sv.modelLoader.createModelInstance(buf)
                 // modelo em metros, origem no chão no centro do objeto, frente para +Z (borda de baixo da etiqueta)
                 val modelo = ModelNode(modelInstance = inst, scaleToUnits = null)
-                c.anchorNode.addChildNode(modelo)
+                c.node.addChildNode(modelo)
                 c.modelo = modelo
             } catch (e: Exception) {
                 Log.e(TAG, "modelo $cod", e)
@@ -241,15 +233,16 @@ class MainActivity : AppCompatActivity() {
             colocados.isEmpty() && destaque != null -> "A etiqueta $destaque ainda não foi publicada. Mostrando as demais."
             colocados.isEmpty() -> "Aponte a câmera para uma etiqueta RackLab"
             colocados.values.any { it.carregando } -> "Carregando modelo… (${vistos.joinToString(", ")})"
-            else -> "Na sala: ${vistos.joinToString(", ")}"
+            else -> colocados.entries.joinToString("\n") { (cod, c) ->
+                (alvos[cod]?.nome ?: cod) + if (c.seguindo) " · travado na etiqueta" else " · última posição (aponte para a etiqueta)"
+            }
         }
         dica.text = if (colocados.isEmpty())
             "${alvos.size} etiqueta(s) cadastrada(s). Chegue a cerca de 1 m da etiqueta, com boa luz, e mova o celular devagar."
-        else "O objeto fica em pé sobre a etiqueta, de frente para a borda de baixo. Aponte para outras etiquetas para ver mais objetos."
+        else "O objeto acompanha a etiqueta: mova ou gire o papel e ele vai junto. Mantenha a etiqueta visível e bem iluminada."
     }
 
     override fun onDestroy() {
-        colocados.values.forEach { runCatching { it.anchorNode.anchor.detach() } }
         super.onDestroy()
     }
 }
