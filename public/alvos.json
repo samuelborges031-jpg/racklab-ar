@@ -1,0 +1,6 @@
+{
+  "versao": 1,
+  "alvos": [
+    { "codigo": "VF7WTR", "nome": "Rack 7", "tipo": "Rack", "largura": 0.15 }
+  ]
+}

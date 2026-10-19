@@ -1,0 +1,13 @@
+# O Netlify publica só a pasta public/ (o código do app Android não vai para o site)
+[build]
+  publish = "public"
+
+[[headers]]
+  for = "/.well-known/assetlinks.json"
+  [headers.values]
+    Content-Type = "application/json"
+
+[[headers]]
+  for = "/alvos.json"
+  [headers.values]
+    Cache-Control = "no-cache"

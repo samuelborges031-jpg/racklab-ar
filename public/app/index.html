@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RackLab AR · App Android</title>
+<style>
+  body{margin:0;background:#0E1317;color:#E2E8ED;font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  main{max-width:560px;margin:0 auto;padding:28px 18px 40px}
+  h1{font-size:26px;margin:0 0 4px} h1 i{font-style:normal;color:#4BB0CC}
+  p.sub{color:#93A0AB;margin:0 0 22px}
+  a.btn{display:block;text-align:center;background:#4BB0CC;color:#06171D;font-weight:700;text-decoration:none;padding:16px;border-radius:12px;font-size:18px}
+  #ver{color:#93A0AB;font-size:13px;text-align:center;margin:8px 0 22px}
+  ol{padding-left:20px} li{margin:6px 0}
+  .box{border:1px solid #2B353E;border-radius:10px;padding:12px 14px;background:#151C22;color:#93A0AB;font-size:14px}
+</style>
+</head>
+<body><main>
+  <h1>Rack<i>Lab</i> AR</h1>
+  <p class="sub">App Android: aponte para a etiqueta e o objeto aparece em pé sobre ela, em tamanho real.</p>
+  <a class="btn" href="racklab-ar.apk" download>Baixar o app (APK)</a>
+  <div id="ver">Carregando versão…</div>
+  <ol>
+    <li>Toque em <b>Baixar o app</b> e abra o arquivo baixado.</li>
+    <li>Se o Android pedir, permita <b>instalar apps desta fonte</b> para o Chrome.</li>
+    <li>Instale, abra o <b>RackLab AR</b> e permita a câmera.</li>
+    <li>Aponte para a etiqueta (impressa com 15 cm de largura) a cerca de 1 m, com boa luz.</li>
+  </ol>
+  <p class="box">Depois de instalado, ao escanear o QR de uma etiqueta com a câmera do celular, o Android abre o app direto. Precisa do Google Play Services para AR (ARCore).</p>
+</main>
+<script>fetch("versao.txt?"+Date.now()).then(r=>r.ok?r.text():"").then(t=>{document.getElementById("ver").textContent=t?("Versão: "+t.trim()):"O app ainda está sendo compilado. Volte em alguns minutos."}).catch(()=>{});</script>
+</body></html>

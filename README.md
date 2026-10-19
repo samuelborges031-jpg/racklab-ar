@@ -1,7 +1,11 @@
 # RackLab AR
 
-Visualizador de realidade aumentada do RackLab.
+- `public/` — site publicado pelo Netlify (`racklab-ar.netlify.app`)
+  - `index.html` — visualizador web (abre `?m=CODIGO`)
+  - `modelos/CODIGO.glb` — modelo 3D de cada QR
+  - `alvos.json` + `alvos/CODIGO.png` — etiquetas que o app reconhece (imprimir com 15 cm de largura)
+  - `app/` — página de download do APK
+  - `.well-known/assetlinks.json` — faz o QR abrir o app direto
+- `android/` — app Android (Kotlin + ARCore + SceneView). Compilado pelo GitHub Actions a cada mudança.
 
-- O QR Code de cada projeto abre `?m=CODIGO` e carrega `modelos/CODIGO.glb`.
-- Sem código no endereço, a página permite abrir um .zip ou .glb manualmente.
-- Para atualizar um projeto, substitua o arquivo `.glb` na pasta `modelos/`. A etiqueta impressa continua valendo.
+Para publicar um QR novo: coloque o `.glb` em `public/modelos/`, a etiqueta em `public/alvos/` e adicione a entrada em `public/alvos.json`.

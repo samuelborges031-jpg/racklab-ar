@@ -1,0 +1,8 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "app.racklab.ar",
+    "sha256_cert_fingerprints": ["9C:9F:E5:F7:84:F8:43:A3:86:77:60:F5:01:19:2C:A7:C3:62:9C:D4:94:C9:AE:E7:EA:5A:32:DC:FE:27:B9:06"]
+  }
+}]
