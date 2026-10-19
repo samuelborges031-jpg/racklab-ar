@@ -71,7 +71,14 @@ class MainActivity : AppCompatActivity() {
         if (ok) carregarAlvos() else mostrarStatus("O RackLab AR precisa da câmera para mostrar os objetos. Libere nas configurações do Android.")
     }
 
+    private fun arquivoErro() = File(filesDir, "ultimo_erro.txt")
+    private fun registrarErro(e: Throwable) {
+        runCatching { arquivoErro().writeText("versão ${packageManager.getPackageInfo(packageName, 0).versionName}\n" + Log.getStackTraceString(e).take(4000)) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        val anterior = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e -> registrarErro(e); anterior?.uncaughtException(t, e) }
         super.onCreate(savedInstanceState)
         root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         status = painel(Gravity.TOP)
@@ -81,6 +88,19 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
         lerLink(intent)
         mostrarStatus("Carregando etiquetas…")
+        val erro = runCatching { arquivoErro().takeIf { it.exists() }?.readText() }.getOrNull()
+        if (erro != null) {
+            arquivoErro().delete()
+            avisoErro = true
+            dica.text = "O app fechou por um erro na última vez. Toque aqui para copiar o detalhe e mandar ao suporte."
+            dica.setOnClickListener {
+                val cb = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cb.setPrimaryClip(android.content.ClipData.newPlainText("RackLab AR erro", erro))
+                dica.text = "Detalhe do erro copiado. Cole na conversa com o Claude."
+                dica.setOnClickListener(null)
+                dica.postDelayed({ avisoErro = false; atualizarTextos() }, 4000)
+            }
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) carregarAlvos()
         else pedirCamera.launch(Manifest.permission.CAMERA)
     }
@@ -177,22 +197,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun aoAtualizar(frame: Frame) {
+        try { aoAtualizarSeguro(frame) } catch (e: Throwable) {
+            Log.e(TAG, "quadro", e); registrarErro(e)
+            runOnUiThread { mostrarStatus("Erro ao acompanhar a etiqueta: ${e.javaClass.simpleName}. O detalhe ficou salvo.") }
+        }
+    }
+
+    private fun aoAtualizarSeguro(frame: Frame) {
         val sv = sceneView ?: return
         for (img in frame.getUpdatedTrackables(AugmentedImage::class.java)) {
             if (img.trackingState != TrackingState.TRACKING) continue
             val cod = img.name
             if (colocados.containsKey(cod)) continue // já está preso: o próprio nó acompanha a etiqueta
             if (img.trackingMethod != AugmentedImage.TrackingMethod.FULL_TRACKING) continue
-            lateinit var c: Colocado
+            // o callback pode disparar já na criação do nó: por isso consulta o mapa em vez de uma variável ainda vazia
             val node = AugmentedImageNode(
                 engine = sv.engine,
                 augmentedImage = img,
                 onTrackingMethodChanged = { m ->
-                    c.seguindo = m == AugmentedImage.TrackingMethod.FULL_TRACKING
+                    colocados[cod]?.let { it.seguindo = m == AugmentedImage.TrackingMethod.FULL_TRACKING }
                     runOnUiThread { atualizarTextos() }
                 }
             )
-            c = Colocado(node)
+            val c = Colocado(node)
             sv.addChildNode(node) // filho direto da cena: a cena atualiza a pose dele a cada quadro
             colocados[cod] = c
             carregarModelo(cod, c)
@@ -224,7 +251,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var avisoErro = false
     private fun atualizarTextos() {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) { runOnUiThread { atualizarTextos() }; return }
         if (sceneView == null) return
         val vistos = colocados.keys.map { alvos[it]?.nome ?: it }
         val alvoDestaque = destaque?.let { alvos[it] }
@@ -237,6 +266,7 @@ class MainActivity : AppCompatActivity() {
                 (alvos[cod]?.nome ?: cod) + if (c.seguindo) " · travado na etiqueta" else " · última posição (aponte para a etiqueta)"
             }
         }
+        if (avisoErro) return
         dica.text = if (colocados.isEmpty())
             "${alvos.size} etiqueta(s) cadastrada(s). Chegue a cerca de 1 m da etiqueta, com boa luz, e mova o celular devagar."
         else "O objeto acompanha a etiqueta: mova ou gire o papel e ele vai junto. Mantenha a etiqueta visível e bem iluminada."
