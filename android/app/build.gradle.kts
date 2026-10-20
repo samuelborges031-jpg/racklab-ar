@@ -47,6 +47,7 @@ android {
 
 dependencies {
     implementation("io.github.sceneview:arsceneview:2.2.1")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")

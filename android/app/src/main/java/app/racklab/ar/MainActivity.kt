@@ -24,6 +24,12 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.ar.core.AugmentedImage
 import com.google.ar.core.AugmentedImageDatabase
+import com.google.ar.core.Coordinates2d
+import com.google.ar.core.Session
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import com.google.ar.core.TrackingState
@@ -56,6 +62,9 @@ import java.nio.ByteBuffer
  * - O objeto começa como maquete (escala da ficha, ex. 1:5); o botão "Tamanho real" alterna para 1:1.
  * - Com a ficha do modelo (modelos/CODIGO.json), cada equipamento ganha um balão de informações ao lado.
  * - "Área livre": sem etiqueta, o objeto é colocado no chão onde a pessoa tocar (detecção de plano do ARCore).
+ * - Leitura do QR Code em si (ML Kit): o QR da tela do RackLab, de uma folha ou da etiqueta abre o modelo
+ *   no ponto onde o QR está. Projetos publicados depois de o app abrir são baixados na hora.
+ *   Com a etiqueta impressa inteira, o modelo passa a acompanhar a etiqueta (rastreamento de imagem).
  * - Cada objeto na cena vira um botão na lista de baixo: tocar seleciona; "Fechar" reduz o objeto a uma
  *   miniatura de ~15 cm (sem balões) e "Abrir" volta ao tamanho atual; "Excluir" tira da cena
  *   (etiquetas excluídas são ignoradas até tocar em "Restaurar").
@@ -76,7 +85,7 @@ class MainActivity : AppCompatActivity() {
     private class Colocado(val codigo: String, val node: io.github.sceneview.node.Node, val pose: () -> Pose, val livre: Boolean = false,
                            val ancora: Anchor? = null, var modelo: ModelNode? = null, var ficha: Ficha? = null,
                            var carregando: Boolean = false, var seguindo: Boolean = true,
-                           var fechado: Boolean = false, var tamMax: Float? = null) {
+                           var fechado: Boolean = false, var tamMax: Float? = null, val viaQr: Boolean = false) {
         fun escala(real: Boolean): Float = if (real) 1f else 1f / (ficha?.escala ?: 5)
         /** Escala aplicada: normal ou, se fechado, miniatura com ~15 cm no maior lado (nunca maior que a normal). */
         fun escalaAtual(real: Boolean): Float {
@@ -108,6 +117,16 @@ class MainActivity : AppCompatActivity() {
     /** Etiquetas tiradas da cena: não voltam a aparecer até "Restaurar". */
     private val excluidos = mutableSetOf<String>()
     private var assinaturaChips = ""
+    // ---- leitura de QR Code ----
+    private val leitorQr by lazy { BarcodeScanning.getClient(BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()) }
+    @Volatile private var qrOcupado = false
+    private var qrUltimo = 0L
+    /** QR lido na imagem da câmera (código, centro em pixels da imagem), à espera do próximo quadro para posicionar. */
+    @Volatile private var qrPendente: Triple<String, Float, Float>? = null
+    /** Lista de etiquetas mudou: refaz o banco de imagens do ARCore no próximo quadro. */
+    @Volatile private var dbPendente = false
+    private var recarregando = false
+    private var ultimoAvisoQr = 0L
     /** Código do modelo a colocar no chão; null = fora do modo área livre. */
     private var modoLivre: String? = null
     @Volatile private var ultimoFrame: Frame? = null
@@ -288,12 +307,7 @@ class MainActivity : AppCompatActivity() {
         val sv = ARSceneView(this).apply {
             planeRenderer.isEnabled = false
             configureSession { session, config ->
-                val db = AugmentedImageDatabase(session)
-                alvos.values.forEach { a ->
-                    try { db.addImage(a.codigo, a.bitmap, a.largura) }
-                    catch (e: Exception) { Log.w(TAG, "imagem ${a.codigo} recusada pelo ARCore", e) }
-                }
-                config.augmentedImageDatabase = db
+                config.augmentedImageDatabase = montarDb(session)
                 config.focusMode = Config.FocusMode.AUTO
                 config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
                 config.lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
@@ -306,6 +320,105 @@ class MainActivity : AppCompatActivity() {
         atualizarTextos()
     }
 
+    private fun montarDb(session: Session): AugmentedImageDatabase {
+        val db = AugmentedImageDatabase(session)
+        alvos.values.forEach { a ->
+            try { db.addImage(a.codigo, a.bitmap, a.largura) }
+            catch (e: Exception) { Log.w(TAG, "imagem ${a.codigo} recusada pelo ARCore", e) }
+        }
+        return db
+    }
+
+    /** Baixa de novo a lista de etiquetas (projetos publicados depois de abrir o app) e acrescenta as novas. */
+    private fun recarregarAlvos(aoTerminar: (() -> Unit)? = null) {
+        if (recarregando) return
+        recarregando = true
+        lifecycleScope.launch {
+            try {
+                val novos = withContext(Dispatchers.IO) {
+                    val j = JSONObject(String(baixar(BASE + "alvos.json?v=" + System.currentTimeMillis())))
+                    val arr = j.getJSONArray("alvos")
+                    (0 until arr.length()).mapNotNull { i ->
+                        val o = arr.getJSONObject(i); val cod = o.getString("codigo")
+                        if (alvos.containsKey(cod)) return@mapNotNull null
+                        runCatching {
+                            val png = baixarComCache("alvos/$cod.png")
+                            val bmp = BitmapFactory.decodeByteArray(png, 0, png.size) ?: return@mapNotNull null
+                            Alvo(cod, o.optString("nome", cod), o.optString("tipo", ""), o.optDouble("largura", 0.15).toFloat(), bmp)
+                        }.getOrNull()
+                    }
+                }
+                if (novos.isNotEmpty()) { novos.forEach { alvos[it.codigo] = it }; dbPendente = true }
+            } catch (e: Exception) { Log.w(TAG, "recarregar etiquetas", e) }
+            finally { recarregando = false; atualizarTextos(); aoTerminar?.invoke() }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (sceneView != null) recarregarAlvos()
+    }
+
+    // ---------- QR Code ----------
+    /** A cada ~0,35 s manda uma imagem da câmera para o leitor de QR (uma por vez, sem travar o AR). */
+    private fun lerQr(frame: Frame) {
+        val agora = android.os.SystemClock.uptimeMillis()
+        if (qrOcupado || agora - qrUltimo < 350) return
+        qrUltimo = agora
+        val img = try { frame.acquireCameraImage() } catch (e: Exception) { return }
+        qrOcupado = true
+        val entrada = try { InputImage.fromMediaImage(img, 0) } catch (e: Exception) { img.close(); qrOcupado = false; return }
+        leitorQr.process(entrada)
+            .addOnSuccessListener { lista -> tratarQr(lista) }
+            .addOnCompleteListener { runCatching { img.close() }; qrOcupado = false }
+    }
+
+    private fun codigoDoQr(texto: String?): String? {
+        val u = runCatching { Uri.parse(texto ?: return null) }.getOrNull() ?: return null
+        if (u.host?.contains("racklab-ar") != true) return null
+        return u.getQueryParameter("m")?.uppercase()?.filter { it.isLetterOrDigit() }?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun tratarQr(lista: List<Barcode>) {
+        for (b in lista) {
+            val cod = codigoDoQr(b.rawValue) ?: continue
+            val caixa = b.boundingBox ?: continue
+            destaque = cod
+            if (colocados.containsKey(cod) || colocados.containsKey("qr:$cod") || cod in excluidos) return
+            val agora = android.os.SystemClock.uptimeMillis()
+            if (!alvos.containsKey(cod)) {
+                if (agora - ultimoAvisoQr > 2500) { ultimoAvisoQr = agora; mostrarStatus("QR $cod lido. Baixando o projeto…") }
+                recarregarAlvos()
+            }
+            qrPendente = Triple(cod, caixa.exactCenterX(), caixa.exactCenterY())
+            return
+        }
+    }
+
+    /** Coloca o modelo onde o QR aparece na tela: na superfície encontrada ali ou, sem superfície, a ~0,8 m da câmera. */
+    private fun colocarPorQr(frame: Frame, q: Triple<String, Float, Float>) {
+        val (cod, ix, iy) = q
+        val sv = sceneView ?: return
+        val session = sv.session ?: return
+        if (colocados.containsKey(cod) || colocados.containsKey("qr:$cod")) return
+        if (frame.camera.trackingState != TrackingState.TRACKING) return
+        val v = FloatArray(2)
+        frame.transformCoordinates2d(Coordinates2d.IMAGE_PIXELS, floatArrayOf(ix, iy), Coordinates2d.VIEW, v)
+        val hit = frame.hitTest(v[0], v[1]).firstOrNull()
+        val cam = frame.camera.pose
+        val alvo = hit?.hitPose?.let { floatArrayOf(it.tx(), it.ty(), it.tz()) }
+            ?: cam.transformPoint(floatArrayOf(0f, -0.15f, -0.8f))
+        val ang = kotlin.math.atan2(cam.tx() - alvo[0], cam.tz() - alvo[2])
+        val pose = Pose(alvo, floatArrayOf(0f, kotlin.math.sin(ang / 2f), 0f, kotlin.math.cos(ang / 2f)))
+        val anchor = runCatching { hit?.trackable?.createAnchor(pose) }.getOrNull() ?: session.createAnchor(pose)
+        val node = AnchorNode(engine = sv.engine, anchor = anchor)
+        sv.addChildNode(node)
+        val c = Colocado(cod, node, { anchor.pose }, ancora = anchor, viaQr = true)
+        colocados["qr:$cod"] = c
+        carregarModelo(cod, c)
+        runOnUiThread { mostrarStatus("QR de ${alvos[cod]?.nome ?: cod} lido: modelo aberto onde o QR está."); atualizarTextos(manterStatus = true) }
+    }
+
     private fun aoAtualizar(frame: Frame) {
         try { aoAtualizarSeguro(frame) } catch (e: Throwable) {
             Log.e(TAG, "quadro", e); registrarErro(e)
@@ -316,11 +429,15 @@ class MainActivity : AppCompatActivity() {
     private fun aoAtualizarSeguro(frame: Frame) {
         val sv = sceneView ?: return
         ultimoFrame = frame
+        if (dbPendente) { dbPendente = false; sv.session?.let { s -> val cfg = s.config; cfg.augmentedImageDatabase = montarDb(s); s.configure(cfg) } }
+        qrPendente?.let { qrPendente = null; colocarPorQr(frame, it) }
+        lerQr(frame)
         for (img in frame.getUpdatedTrackables(AugmentedImage::class.java)) {
             if (img.trackingState != TrackingState.TRACKING) continue
             val cod = img.name
             if (colocados.containsKey(cod)) continue // já está preso: o próprio nó acompanha a etiqueta
             if (cod in excluidos) continue // a pessoa tirou este objeto da cena
+            colocados.remove("qr:$cod")?.let { velho -> runCatching { sv.removeChildNode(velho.node) }; runCatching { velho.ancora?.detach() } }
             if (img.trackingMethod != AugmentedImage.TrackingMethod.FULL_TRACKING) continue
             // o callback pode disparar já na criação do nó: por isso consulta o mapa em vez de uma variável ainda vazia
             val node = AugmentedImageNode(
@@ -410,7 +527,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- Lista de objetos: selecionar, fechar (miniatura), excluir ----------
-    private fun nomeDe(c: Colocado) = (alvos[c.codigo]?.nome ?: c.codigo) + if (c.livre) " (chão)" else ""
+    private fun nomeDe(c: Colocado) = (alvos[c.codigo]?.nome ?: c.codigo) + if (c.livre) " (chão)" else if (c.viaQr) " (QR)" else ""
 
     private fun chip(texto: String, ativo: Boolean, acao: () -> Unit) = TextView(this).apply {
         text = texto; textSize = 13.5f; maxLines = 1
@@ -456,7 +573,7 @@ class MainActivity : AppCompatActivity() {
         runCatching { sv?.removeChildNode(c.node) }
         runCatching { c.ancora?.detach() }
         runCatching { c.node.destroy() }
-        if (!c.livre) excluidos += c.codigo
+        if (!c.livre) excluidos += c.codigo // vale para a etiqueta e para o QR
         selecionado = null
         etiquetas.atualizar(emptyList(), emptyList())
         mostrarStatus("${nomeDe(c)} saiu da cena." + if (!c.livre) " Toque em Restaurar para trazer de volta." else "")
@@ -548,11 +665,11 @@ class MainActivity : AppCompatActivity() {
                 "Área livre · $livreNome\nAponte para o chão e mova o celular devagar até aparecer a malha. Depois toque onde quer colocar."
             colocados.isEmpty() && alvoDestaque != null -> "Aponte para a etiqueta ${alvoDestaque.codigo} · ${alvoDestaque.nome}"
             colocados.isEmpty() && destaque != null -> "A etiqueta $destaque ainda não foi publicada. Mostrando as demais."
-            colocados.isEmpty() -> "Aponte a câmera para uma etiqueta RackLab"
+            colocados.isEmpty() -> "Aponte a câmera para um QR Code RackLab"
             colocados.values.any { it.carregando } -> "Carregando modelo… (${vistos.joinToString(", ")})"
             else -> colocados.values.joinToString("\n") { c ->
                 (alvos[c.codigo]?.nome ?: c.codigo) + " · " + (if (c.fechado) "fechado (miniatura)" else if (tamanhoReal) "tamanho real" else "maquete 1:${c.ficha?.escala ?: 5}") +
-                    (if (c.livre) " · no chão" else "") + if (c.seguindo) "" else " · última posição (aponte para a etiqueta)"
+                    (if (c.livre) " · no chão" else if (c.viaQr) " · aberto pelo QR" else "") + if (c.seguindo) "" else " · última posição (aponte para a etiqueta)"
             }
         }
         if (avisoErro) return
@@ -561,7 +678,7 @@ class MainActivity : AppCompatActivity() {
         else if (modoLivre != null)
             "Toque no chão para colocar; toque em outro ponto para mudar de lugar. Toque em Concluir para esconder a malha."
         else if (colocados.isEmpty())
-            "${alvos.size} etiqueta(s) cadastrada(s). Chegue a cerca de 1 m da etiqueta, com boa luz, e mova o celular devagar. Sem etiqueta? Toque em Área livre."
+            "${alvos.size} projeto(s) publicados. Aponte para o QR Code (na etiqueta, numa folha ou na tela do RackLab) a cerca de 50 cm. Sem QR? Toque em Área livre."
         else if (colocados.values.any { it.modelo != null } && !temFicha)
             "Este modelo foi publicado sem a ficha dos equipamentos. No RackLab, toque em Publicar no AR de novo para ver as informações."
         else if (colocados.size > 1) "Toque no nome de um objeto, na lista de baixo, para fechar ou excluir."
