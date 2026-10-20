@@ -13,7 +13,9 @@ import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -26,6 +28,7 @@ import com.google.ar.core.Frame
 import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ARSceneView
 import io.github.sceneview.ar.node.AugmentedImageNode
+import io.github.sceneview.math.Scale
 import io.github.sceneview.node.ModelNode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -45,6 +48,8 @@ import java.nio.ByteBuffer
  *   Se a etiqueta for movida, o objeto vai junto; se ela sair da tela, o objeto fica na última posição vista.
  * - Várias etiquetas na mesma sala funcionam ao mesmo tempo.
  * - O QR da etiqueta abre o app direto (App Links); o código do link vira destaque na tela.
+ * - O objeto começa como maquete (escala da ficha, ex. 1:5); o botão "Tamanho real" alterna para 1:1.
+ * - Com a ficha do modelo (modelos/CODIGO.json), cada equipamento ganha um balão de informações ao lado.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -56,12 +61,24 @@ class MainActivity : AppCompatActivity() {
     data class Alvo(val codigo: String, val nome: String, val tipo: String, val largura: Float, val bitmap: Bitmap)
 
     /** Objeto preso a uma etiqueta: o AugmentedImageNode copia a pose da etiqueta a cada quadro. */
-    private class Colocado(val node: AugmentedImageNode, var modelo: ModelNode? = null, var carregando: Boolean = false, var seguindo: Boolean = true)
+    private class Colocado(val node: AugmentedImageNode, val imagem: AugmentedImage, var modelo: ModelNode? = null, var ficha: Ficha? = null,
+                           var carregando: Boolean = false, var seguindo: Boolean = true) {
+        fun escala(real: Boolean): Float = if (real) 1f else 1f / (ficha?.escala ?: 5)
+    }
 
     private lateinit var root: FrameLayout
     private lateinit var status: TextView
     private lateinit var dica: TextView
     private var sceneView: ARSceneView? = null
+    private lateinit var etiquetas: Etiquetas
+    private lateinit var barra: LinearLayout
+    private lateinit var btTamanho: Button
+    private lateinit var btInfo: Button
+    private var tamanhoReal = false
+    private var mostrarInfo = true
+    private val proj = FloatArray(16)
+    private val vista = FloatArray(16)
+    private val vp = FloatArray(16)
 
     private val alvos = mutableMapOf<String, Alvo>()
     private val colocados = mutableMapOf<String, Colocado>()
@@ -85,6 +102,20 @@ class MainActivity : AppCompatActivity() {
         dica = painel(Gravity.BOTTOM)
         root.addView(status, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP).apply { setMargins(24, 72, 24, 0) })
         root.addView(dica, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 64) })
+        etiquetas = Etiquetas(this)
+        root.addView(etiquetas, 0, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        btTamanho = botao("Tamanho real") { tamanhoReal = !tamanhoReal; aplicarEscala(); atualizarTextos() }
+        btInfo = botao("Ocultar informações") { mostrarInfo = !mostrarInfo; if (!mostrarInfo) etiquetas.atualizar(emptyList(), emptyList()); atualizarTextos() }
+        barra = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; visibility = android.view.View.GONE
+            addView(btTamanho, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 12, 0) })
+            addView(btInfo, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        root.addView(barra, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 64) })
+        // a dica sobe para cima da barra de botões; os balões não invadem os painéis
+        barra.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> posicionarPaineis() }
+        dica.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> posicionarPaineis() }
+        status.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> posicionarPaineis() }
         setContentView(root)
         lerLink(intent)
         mostrarStatus("Carregando etiquetas…")
@@ -126,6 +157,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun mostrarStatus(t: String) { status.text = t }
+
+    private fun botao(texto: String, acao: () -> Unit) = Button(this).apply {
+        text = texto; isAllCaps = false; textSize = 14f
+        setTextColor(Color.parseColor("#06171D"))
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        background = GradientDrawable().apply { cornerRadius = 60f; setColor(Color.parseColor("#4BB0CC")) }
+        setPadding(24, 28, 24, 28)
+        setOnClickListener { acao() }
+    }
+
+    private fun posicionarPaineis() {
+        val lpDica = dica.layoutParams as FrameLayout.LayoutParams
+        val margem = if (barra.visibility == android.view.View.VISIBLE) 64 + barra.height + 20 else 64
+        if (lpDica.bottomMargin != margem) { lpDica.bottomMargin = margem; dica.layoutParams = lpDica }
+        etiquetas.reservaTopo = if (status.visibility == android.view.View.VISIBLE) status.bottom.toFloat() else 0f
+        etiquetas.reservaBase = if (dica.visibility == android.view.View.VISIBLE && dica.top > 0) dica.top.toFloat() else root.height.toFloat()
+    }
+
+    private fun aplicarEscala() {
+        colocados.values.forEach { c -> c.modelo?.let { m -> val s = c.escala(tamanhoReal); m.scale = Scale(s, s, s) } }
+    }
 
     // ---------- Download ----------
     private fun baixar(url: String): ByteArray {
@@ -219,12 +271,50 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread { atualizarTextos() }
                 }
             )
-            val c = Colocado(node)
+            val c = Colocado(node, img)
             sv.addChildNode(node) // filho direto da cena: a cena atualiza a pose dele a cada quadro
             colocados[cod] = c
             carregarModelo(cod, c)
             atualizarTextos()
         }
+        if (mostrarInfo) projetarEtiquetas(frame)
+    }
+
+    /** Leva o ponto de cada equipamento (metros, no modelo) para a tela, seguindo a etiqueta e a escala atual. */
+    private fun projetarEtiquetas(frame: Frame) {
+        val prontos = colocados.values.filter { it.modelo != null && it.ficha != null }
+        if (prontos.isEmpty()) { etiquetas.atualizar(emptyList(), emptyList()); return }
+        if (frame.camera.trackingState != TrackingState.TRACKING) return
+        frame.camera.getProjectionMatrix(proj, 0, 0.05f, 100f)
+        frame.camera.getViewMatrix(vista, 0)
+        android.opengl.Matrix.multiplyMM(vp, 0, proj, 0, vista, 0)
+        val w = etiquetas.width.toFloat(); val h = etiquetas.height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val v = FloatArray(4); val o = FloatArray(4)
+        fun tela(pose: com.google.ar.core.Pose, x: Float, y: Float, z: Float): Pair<Float, Float>? {
+            val p = pose.transformPoint(floatArrayOf(x, y, z))
+            v[0] = p[0]; v[1] = p[1]; v[2] = p[2]; v[3] = 1f
+            android.opengl.Matrix.multiplyMV(o, 0, vp, 0, v, 0)
+            if (o[3] <= 0.01f) return null
+            return ((o[0] / o[3] + 1f) / 2f * w) to ((1f - o[1] / o[3]) / 2f * h)
+        }
+        val pontos = mutableListOf<Etiquetas.Ponto>()
+        val topos = mutableListOf<Etiquetas.Topo>()
+        for (c in prontos) {
+            val f = c.ficha ?: continue
+            val s = c.escala(tamanhoReal)
+            val pose = c.imagem.centerPose
+            for (item in f.itens) {
+                val t = tela(pose, item.ancora[0] * s, item.ancora[1] * s, item.ancora[2] * s) ?: continue
+                pontos += Etiquetas.Ponto(t.first, t.second, item)
+            }
+            val alto = (f.tamanho?.get(1) ?: (f.itens.maxOfOrNull { i -> i.ancora[1] } ?: 1f)) * s
+            if (f.titulo.isNotBlank() || f.resumo.isNotEmpty()) tela(pose, 0f, alto, 0f)?.let { t ->
+                topos += Etiquetas.Topo(t.first, t.second, f.titulo.ifBlank { alvos[c.imagem.name]?.nome ?: "" }, f.resumo,
+                    if (tamanhoReal) "Tamanho real (1:1)" else "Maquete 1:${f.escala}")
+            }
+        }
+        etiquetas.atualizar(pontos, topos)
     }
 
     private fun carregarModelo(cod: String, c: Colocado) {
@@ -234,11 +324,18 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val bytes = withContext(Dispatchers.IO) { baixarComCache("modelos/$cod.glb") }
+                // ficha com as informações dos equipamentos (modelos publicados antes dela não têm)
+                c.ficha = withContext(Dispatchers.IO) {
+                    runCatching { Ficha.ler(String(baixarComCache("modelos/$cod.json"))) }
+                        .onFailure { Log.i(TAG, "sem ficha para $cod: ${it.message}") }.getOrNull()
+                }
                 val sv = sceneView ?: return@launch
                 val buf = ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); rewind() }
                 val inst = sv.modelLoader.createModelInstance(buf)
                 // modelo em metros, origem no chão no centro do objeto, frente para +Z (borda de baixo da etiqueta)
                 val modelo = ModelNode(modelInstance = inst, scaleToUnits = null)
+                val s = c.escala(tamanhoReal)
+                modelo.scale = Scale(s, s, s)
                 c.node.addChildNode(modelo)
                 c.modelo = modelo
             } catch (e: Exception) {
@@ -255,6 +352,14 @@ class MainActivity : AppCompatActivity() {
     private fun atualizarTextos() {
         if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) { runOnUiThread { atualizarTextos() }; return }
         if (sceneView == null) return
+        val algum = colocados.values.any { it.modelo != null }
+        val vis = if (algum) android.view.View.VISIBLE else android.view.View.GONE
+        if (barra.visibility != vis) { barra.visibility = vis; barra.post { posicionarPaineis() } }
+        val escalas = colocados.values.mapNotNull { it.ficha?.escala }.distinct()
+        btTamanho.text = if (tamanhoReal) "Ver maquete" + (if (escalas.size == 1) " 1:${escalas[0]}" else "") else "Tamanho real"
+        val temFicha = colocados.values.any { it.ficha != null }
+        btInfo.text = if (mostrarInfo) "Ocultar informações" else "Mostrar informações"
+        btInfo.isEnabled = temFicha; btInfo.alpha = if (temFicha) 1f else 0.5f
         val vistos = colocados.keys.map { alvos[it]?.nome ?: it }
         val alvoDestaque = destaque?.let { alvos[it] }
         status.text = when {
@@ -263,12 +368,16 @@ class MainActivity : AppCompatActivity() {
             colocados.isEmpty() -> "Aponte a câmera para uma etiqueta RackLab"
             colocados.values.any { it.carregando } -> "Carregando modelo… (${vistos.joinToString(", ")})"
             else -> colocados.entries.joinToString("\n") { (cod, c) ->
-                (alvos[cod]?.nome ?: cod) + if (c.seguindo) " · travado na etiqueta" else " · última posição (aponte para a etiqueta)"
+                (alvos[cod]?.nome ?: cod) + " · " + (if (tamanhoReal) "tamanho real" else "maquete 1:${c.ficha?.escala ?: 5}") +
+                    if (c.seguindo) "" else " · última posição (aponte para a etiqueta)"
             }
         }
         if (avisoErro) return
         dica.text = if (colocados.isEmpty())
             "${alvos.size} etiqueta(s) cadastrada(s). Chegue a cerca de 1 m da etiqueta, com boa luz, e mova o celular devagar."
+        else if (colocados.values.any { it.modelo != null } && !temFicha)
+            "Este modelo foi publicado sem a ficha dos equipamentos. No RackLab, toque em Publicar no AR de novo para ver as informações."
+        else if (mostrarInfo && temFicha) "Toque num balão para ver a ficha completa do equipamento. O objeto acompanha a etiqueta."
         else "O objeto acompanha a etiqueta: mova ou gire o papel e ele vai junto. Mantenha a etiqueta visível e bem iluminada."
     }
 
