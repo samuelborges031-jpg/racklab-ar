@@ -15,6 +15,7 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -55,6 +56,9 @@ import java.nio.ByteBuffer
  * - O objeto começa como maquete (escala da ficha, ex. 1:5); o botão "Tamanho real" alterna para 1:1.
  * - Com a ficha do modelo (modelos/CODIGO.json), cada equipamento ganha um balão de informações ao lado.
  * - "Área livre": sem etiqueta, o objeto é colocado no chão onde a pessoa tocar (detecção de plano do ARCore).
+ * - Cada objeto na cena vira um botão na lista de baixo: tocar seleciona; "Fechar" reduz o objeto a uma
+ *   miniatura de ~15 cm (sem balões) e "Abrir" volta ao tamanho atual; "Excluir" tira da cena
+ *   (etiquetas excluídas são ignoradas até tocar em "Restaurar").
  */
 class MainActivity : AppCompatActivity() {
 
@@ -71,8 +75,17 @@ class MainActivity : AppCompatActivity() {
      */
     private class Colocado(val codigo: String, val node: io.github.sceneview.node.Node, val pose: () -> Pose, val livre: Boolean = false,
                            val ancora: Anchor? = null, var modelo: ModelNode? = null, var ficha: Ficha? = null,
-                           var carregando: Boolean = false, var seguindo: Boolean = true) {
+                           var carregando: Boolean = false, var seguindo: Boolean = true,
+                           var fechado: Boolean = false, var tamMax: Float? = null) {
         fun escala(real: Boolean): Float = if (real) 1f else 1f / (ficha?.escala ?: 5)
+        /** Escala aplicada: normal ou, se fechado, miniatura com ~15 cm no maior lado (nunca maior que a normal). */
+        fun escalaAtual(real: Boolean): Float {
+            val n = escala(real)
+            if (!fechado) return n
+            val t = tamMax ?: ficha?.tamanho?.maxOrNull() ?: 1f
+            return minOf(n, MINIATURA / t.coerceAtLeast(0.01f))
+        }
+        companion object { const val MINIATURA = 0.15f }
     }
 
     private lateinit var root: FrameLayout
@@ -84,6 +97,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btTamanho: Button
     private lateinit var btInfo: Button
     private lateinit var btLivre: Button
+    private lateinit var chips: LinearLayout
+    private lateinit var rolagemChips: HorizontalScrollView
+    private lateinit var acoes: LinearLayout
+    private lateinit var btFechar: Button
+    private lateinit var btExcluir: Button
+    private lateinit var painelBaixo: LinearLayout
+    /** Chave (em [colocados]) do objeto escolhido na lista; null = nenhum. */
+    private var selecionado: String? = null
+    /** Etiquetas tiradas da cena: não voltam a aparecer até "Restaurar". */
+    private val excluidos = mutableSetOf<String>()
+    private var assinaturaChips = ""
     /** Código do modelo a colocar no chão; null = fora do modo área livre. */
     private var modoLivre: String? = null
     @Volatile private var ultimoFrame: Frame? = null
@@ -126,9 +150,27 @@ class MainActivity : AppCompatActivity() {
             addView(btTamanho, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 10, 0) })
             addView(btInfo, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
-        root.addView(barra, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 64) })
-        // a dica sobe para cima da barra de botões; os balões não invadem os painéis
-        barra.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> posicionarPaineis() }
+        // lista de objetos na cena (rolagem lateral) + ações do objeto escolhido, acima da barra principal
+        chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        rolagemChips = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; visibility = android.view.View.GONE; addView(chips) }
+        btFechar = botao("Fechar") { alternarFechado() }
+        btExcluir = botao("Excluir") { excluirSelecionado() }.apply {
+            setTextColor(Color.WHITE); background = GradientDrawable().apply { cornerRadius = 60f; setColor(Color.parseColor("#B8332A")) }
+        }
+        acoes = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; visibility = android.view.View.GONE
+            addView(btFechar, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 10, 0) })
+            addView(btExcluir, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        painelBaixo = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(acoes, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 12) })
+            addView(rolagemChips, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 12) })
+            addView(barra, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        root.addView(painelBaixo, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 64) })
+        // a dica sobe para cima do painel de baixo; os balões não invadem os painéis
+        painelBaixo.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> posicionarPaineis() }
         dica.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> posicionarPaineis() }
         status.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> posicionarPaineis() }
         setContentView(root)
@@ -174,24 +216,24 @@ class MainActivity : AppCompatActivity() {
     private fun mostrarStatus(t: String) { status.text = t }
 
     private fun botao(texto: String, acao: () -> Unit) = Button(this).apply {
-        text = texto; isAllCaps = false; textSize = 14f
+        text = texto; isAllCaps = false; textSize = 13.5f; maxLines = 1
         setTextColor(Color.parseColor("#06171D"))
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         background = GradientDrawable().apply { cornerRadius = 60f; setColor(Color.parseColor("#4BB0CC")) }
-        setPadding(24, 28, 24, 28)
+        setPadding(20, 22, 20, 22); minHeight = 0; minimumHeight = 0
         setOnClickListener { acao() }
     }
 
     private fun posicionarPaineis() {
         val lpDica = dica.layoutParams as FrameLayout.LayoutParams
-        val margem = if (barra.visibility == android.view.View.VISIBLE) 64 + barra.height + 20 else 64
+        val margem = if (painelBaixo.height > 0) 64 + painelBaixo.height + 20 else 64
         if (lpDica.bottomMargin != margem) { lpDica.bottomMargin = margem; dica.layoutParams = lpDica }
         etiquetas.reservaTopo = if (status.visibility == android.view.View.VISIBLE) status.bottom.toFloat() else 0f
         etiquetas.reservaBase = if (dica.visibility == android.view.View.VISIBLE && dica.top > 0) dica.top.toFloat() else root.height.toFloat()
     }
 
     private fun aplicarEscala() {
-        colocados.values.forEach { c -> c.modelo?.let { m -> val s = c.escala(tamanhoReal); m.scale = Scale(s, s, s) } }
+        colocados.values.forEach { c -> c.modelo?.let { m -> val s = c.escalaAtual(tamanhoReal); m.scale = Scale(s, s, s) } }
     }
 
     // ---------- Download ----------
@@ -278,6 +320,7 @@ class MainActivity : AppCompatActivity() {
             if (img.trackingState != TrackingState.TRACKING) continue
             val cod = img.name
             if (colocados.containsKey(cod)) continue // já está preso: o próprio nó acompanha a etiqueta
+            if (cod in excluidos) continue // a pessoa tirou este objeto da cena
             if (img.trackingMethod != AugmentedImage.TrackingMethod.FULL_TRACKING) continue
             // o callback pode disparar já na criação do nó: por isso consulta o mapa em vez de uma variável ainda vazia
             val node = AugmentedImageNode(
@@ -299,7 +342,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Leva o ponto de cada equipamento (metros, no modelo) para a tela, seguindo a etiqueta e a escala atual. */
     private fun projetarEtiquetas(frame: Frame) {
-        val prontos = colocados.values.filter { it.modelo != null && it.ficha != null }
+        val prontos = colocados.values.filter { it.modelo != null && it.ficha != null && !it.fechado }
         if (prontos.isEmpty()) { etiquetas.atualizar(emptyList(), emptyList()); return }
         if (frame.camera.trackingState != TrackingState.TRACKING) return
         frame.camera.getProjectionMatrix(proj, 0, 0.05f, 100f)
@@ -351,7 +394,8 @@ class MainActivity : AppCompatActivity() {
                 val inst = sv.modelLoader.createModelInstance(buf)
                 // modelo em metros, origem no chão no centro do objeto, frente para +Z (borda de baixo da etiqueta)
                 val modelo = ModelNode(modelInstance = inst, scaleToUnits = null)
-                val s = c.escala(tamanhoReal)
+                c.tamMax = runCatching { inst.asset.boundingBox.halfExtent.maxOrNull()?.times(2f) }.getOrNull()
+                val s = c.escalaAtual(tamanhoReal)
                 modelo.scale = Scale(s, s, s)
                 c.node.addChildNode(modelo)
                 c.modelo = modelo
@@ -363,6 +407,60 @@ class MainActivity : AppCompatActivity() {
                 atualizarTextos()
             }
         }
+    }
+
+    // ---------- Lista de objetos: selecionar, fechar (miniatura), excluir ----------
+    private fun nomeDe(c: Colocado) = (alvos[c.codigo]?.nome ?: c.codigo) + if (c.livre) " (chão)" else ""
+
+    private fun chip(texto: String, ativo: Boolean, acao: () -> Unit) = TextView(this).apply {
+        text = texto; textSize = 13.5f; maxLines = 1
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        setTextColor(if (ativo) Color.parseColor("#06171D") else Color.parseColor("#E2E8ED"))
+        setPadding(30, 18, 30, 18)
+        background = GradientDrawable().apply {
+            cornerRadius = 60f
+            setColor(if (ativo) Color.parseColor("#4BB0CC") else Color.parseColor("#D9151C22"))
+            setStroke(2, Color.parseColor(if (ativo) "#4BB0CC" else "#5A6873"))
+        }
+        isClickable = true; setOnClickListener { acao() }
+    }
+
+    private fun montarChips() {
+        val assinatura = colocados.entries.joinToString("|") { (k, c) -> "$k:${c.fechado}:${c.modelo != null}" } + "#$selecionado#${excluidos.size}"
+        if (assinatura == assinaturaChips) return
+        assinaturaChips = assinatura
+        chips.removeAllViews()
+        val lp = { LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 12, 0) } }
+        colocados.forEach { (k, c) ->
+            val t = nomeDe(c) + if (c.fechado) " · fechado" else ""
+            chips.addView(chip(t, k == selecionado) { selecionado = if (selecionado == k) null else k; atualizarTextos() }, lp())
+        }
+        if (excluidos.isNotEmpty()) chips.addView(chip("Restaurar (${excluidos.size})", false) {
+            excluidos.clear(); mostrarStatus("Aponte de novo para as etiquetas para trazer os objetos de volta."); atualizarTextos()
+        }, lp())
+        rolagemChips.visibility = if (chips.childCount > 0) android.view.View.VISIBLE else android.view.View.GONE
+    }
+
+    private fun alternarFechado() {
+        val c = selecionado?.let { colocados[it] } ?: return
+        c.fechado = !c.fechado
+        c.modelo?.let { m -> val s = c.escalaAtual(tamanhoReal); m.scale = Scale(s, s, s) }
+        if (c.fechado) etiquetas.atualizar(emptyList(), emptyList())
+        atualizarTextos()
+    }
+
+    private fun excluirSelecionado() {
+        val k = selecionado ?: return
+        val c = colocados.remove(k) ?: return
+        val sv = sceneView
+        runCatching { sv?.removeChildNode(c.node) }
+        runCatching { c.ancora?.detach() }
+        runCatching { c.node.destroy() }
+        if (!c.livre) excluidos += c.codigo
+        selecionado = null
+        etiquetas.atualizar(emptyList(), emptyList())
+        mostrarStatus("${nomeDe(c)} saiu da cena." + if (!c.livre) " Toque em Restaurar para trazer de volta." else "")
+        atualizarTextos(manterStatus = true)
     }
 
     // ---------- Área livre (sem etiqueta) ----------
@@ -424,9 +522,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var avisoErro = false
-    private fun atualizarTextos() {
-        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) { runOnUiThread { atualizarTextos() }; return }
+    private fun atualizarTextos(manterStatus: Boolean = false) {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) { runOnUiThread { atualizarTextos(manterStatus) }; return }
         if (sceneView == null) return
+        if (selecionado != null && !colocados.containsKey(selecionado)) selecionado = null
+        montarChips()
+        val sel = selecionado?.let { colocados[it] }
+        acoes.visibility = if (sel != null) android.view.View.VISIBLE else android.view.View.GONE
+        if (sel != null) btFechar.text = if (sel.fechado) "Abrir ${nomeDe(sel)}" else "Fechar (miniatura)"
         val algum = colocados.values.any { it.modelo != null }
         if (barra.visibility != android.view.View.VISIBLE) { barra.visibility = android.view.View.VISIBLE; barra.post { posicionarPaineis() } }
         val visObj = if (algum) android.view.View.VISIBLE else android.view.View.GONE
@@ -440,7 +543,7 @@ class MainActivity : AppCompatActivity() {
         val vistos = colocados.values.map { alvos[it.codigo]?.nome ?: it.codigo }
         val alvoDestaque = destaque?.let { alvos[it] }
         val livreNome = modoLivre?.let { alvos[it]?.nome ?: it }
-        status.text = when {
+        if (!manterStatus) status.text = when {
             livreNome != null && colocados.values.none { it.livre && it.codigo == modoLivre } ->
                 "Área livre · $livreNome\nAponte para o chão e mova o celular devagar até aparecer a malha. Depois toque onde quer colocar."
             colocados.isEmpty() && alvoDestaque != null -> "Aponte para a etiqueta ${alvoDestaque.codigo} · ${alvoDestaque.nome}"
@@ -448,18 +551,21 @@ class MainActivity : AppCompatActivity() {
             colocados.isEmpty() -> "Aponte a câmera para uma etiqueta RackLab"
             colocados.values.any { it.carregando } -> "Carregando modelo… (${vistos.joinToString(", ")})"
             else -> colocados.values.joinToString("\n") { c ->
-                (alvos[c.codigo]?.nome ?: c.codigo) + " · " + (if (tamanhoReal) "tamanho real" else "maquete 1:${c.ficha?.escala ?: 5}") +
+                (alvos[c.codigo]?.nome ?: c.codigo) + " · " + (if (c.fechado) "fechado (miniatura)" else if (tamanhoReal) "tamanho real" else "maquete 1:${c.ficha?.escala ?: 5}") +
                     (if (c.livre) " · no chão" else "") + if (c.seguindo) "" else " · última posição (aponte para a etiqueta)"
             }
         }
         if (avisoErro) return
-        dica.text = if (modoLivre != null)
+        dica.text = if (sel != null)
+            "${nomeDe(sel)} selecionado. Fechar reduz a uma miniatura; Excluir tira da cena. Toque no nome de novo para desmarcar."
+        else if (modoLivre != null)
             "Toque no chão para colocar; toque em outro ponto para mudar de lugar. Toque em Concluir para esconder a malha."
         else if (colocados.isEmpty())
             "${alvos.size} etiqueta(s) cadastrada(s). Chegue a cerca de 1 m da etiqueta, com boa luz, e mova o celular devagar. Sem etiqueta? Toque em Área livre."
         else if (colocados.values.any { it.modelo != null } && !temFicha)
             "Este modelo foi publicado sem a ficha dos equipamentos. No RackLab, toque em Publicar no AR de novo para ver as informações."
-        else if (mostrarInfo && temFicha) "Toque num balão para ver a ficha completa do equipamento. O objeto acompanha a etiqueta."
+        else if (colocados.size > 1) "Toque no nome de um objeto, na lista de baixo, para fechar ou excluir."
+        else if (mostrarInfo && temFicha) "Toque num balão para ver a ficha completa do equipamento. Toque no nome do objeto para fechar ou excluir."
         else "O objeto acompanha a etiqueta: mova ou gire o papel e ele vai junto. Mantenha a etiqueta visível e bem iluminada."
     }
 
