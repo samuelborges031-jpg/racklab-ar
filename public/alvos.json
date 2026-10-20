@@ -12,6 +12,12 @@
       "nome": "Acesso 9",
       "tipo": "Área de controle de acesso",
       "largura": 0.15
+    },
+    {
+      "codigo": "JSN6VV",
+      "nome": "Acesso 10",
+      "tipo": "Área de controle de acesso",
+      "largura": 0.15
     }
   ]
 }
