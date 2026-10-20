@@ -26,6 +26,10 @@ class Etiquetas(context: Context) : View(context) {
     @Volatile private var pontos: List<Ponto> = emptyList()
     @Volatile private var topos: List<Topo> = emptyList()
     var selecionado: String? = null
+    /** Modo área livre: toque fora dos balões vai para cá (coordenadas da tela). */
+    var tocarLivre: ((Float, Float) -> Unit)? = null
+    private var toqueX = 0f
+    private var toqueY = 0f
     /** Faixas da tela ocupadas pelos painéis do app (px). */
     var reservaTopo = 0f
     var reservaBase = 0f
@@ -143,7 +147,15 @@ class Etiquetas(context: Context) : View(context) {
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
-        val hit = caixas.lastOrNull { it.first.contains(e.x, e.y) } ?: return false
+        val hit = caixas.lastOrNull { it.first.contains(e.x, e.y) }
+        if (hit == null) {
+            val livre = tocarLivre ?: return false
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> { toqueX = e.x; toqueY = e.y }
+                MotionEvent.ACTION_UP -> if (kotlin.math.hypot(e.x - toqueX, e.y - toqueY) < 24f * d) livre(e.x, e.y)
+            }
+            return true
+        }
         if (e.action == MotionEvent.ACTION_UP) {
             selecionado = if (selecionado == hit.second) null else hit.second
             invalidate()

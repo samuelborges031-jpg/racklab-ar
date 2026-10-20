@@ -27,7 +27,11 @@ import com.google.ar.core.Config
 import com.google.ar.core.Frame
 import com.google.ar.core.TrackingState
 import io.github.sceneview.ar.ARSceneView
+import io.github.sceneview.ar.node.AnchorNode
 import io.github.sceneview.ar.node.AugmentedImageNode
+import com.google.ar.core.Anchor
+import com.google.ar.core.Plane
+import com.google.ar.core.Pose
 import io.github.sceneview.math.Scale
 import io.github.sceneview.node.ModelNode
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +54,7 @@ import java.nio.ByteBuffer
  * - O QR da etiqueta abre o app direto (App Links); o código do link vira destaque na tela.
  * - O objeto começa como maquete (escala da ficha, ex. 1:5); o botão "Tamanho real" alterna para 1:1.
  * - Com a ficha do modelo (modelos/CODIGO.json), cada equipamento ganha um balão de informações ao lado.
+ * - "Área livre": sem etiqueta, o objeto é colocado no chão onde a pessoa tocar (detecção de plano do ARCore).
  */
 class MainActivity : AppCompatActivity() {
 
@@ -60,8 +65,12 @@ class MainActivity : AppCompatActivity() {
 
     data class Alvo(val codigo: String, val nome: String, val tipo: String, val largura: Float, val bitmap: Bitmap)
 
-    /** Objeto preso a uma etiqueta: o AugmentedImageNode copia a pose da etiqueta a cada quadro. */
-    private class Colocado(val node: AugmentedImageNode, val imagem: AugmentedImage, var modelo: ModelNode? = null, var ficha: Ficha? = null,
+    /**
+     * Objeto colocado na cena: preso a uma etiqueta (AugmentedImageNode, segue a etiqueta a cada quadro)
+     * ou numa âncora no chão (área livre). [pose] dá a posição atual, usada para os balões.
+     */
+    private class Colocado(val codigo: String, val node: io.github.sceneview.node.Node, val pose: () -> Pose, val livre: Boolean = false,
+                           val ancora: Anchor? = null, var modelo: ModelNode? = null, var ficha: Ficha? = null,
                            var carregando: Boolean = false, var seguindo: Boolean = true) {
         fun escala(real: Boolean): Float = if (real) 1f else 1f / (ficha?.escala ?: 5)
     }
@@ -74,6 +83,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var barra: LinearLayout
     private lateinit var btTamanho: Button
     private lateinit var btInfo: Button
+    private lateinit var btLivre: Button
+    /** Código do modelo a colocar no chão; null = fora do modo área livre. */
+    private var modoLivre: String? = null
+    @Volatile private var ultimoFrame: Frame? = null
     private var tamanhoReal = false
     private var mostrarInfo = true
     private val proj = FloatArray(16)
@@ -105,10 +118,12 @@ class MainActivity : AppCompatActivity() {
         etiquetas = Etiquetas(this)
         root.addView(etiquetas, 0, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         btTamanho = botao("Tamanho real") { tamanhoReal = !tamanhoReal; aplicarEscala(); atualizarTextos() }
-        btInfo = botao("Ocultar informações") { mostrarInfo = !mostrarInfo; if (!mostrarInfo) etiquetas.atualizar(emptyList(), emptyList()); atualizarTextos() }
+        btInfo = botao("Ocultar info") { mostrarInfo = !mostrarInfo; if (!mostrarInfo) etiquetas.atualizar(emptyList(), emptyList()); atualizarTextos() }
+        btLivre = botao("Área livre") { if (modoLivre != null) sairAreaLivre() else escolherAreaLivre() }
         barra = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; visibility = android.view.View.GONE
-            addView(btTamanho, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 12, 0) })
+            addView(btLivre, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 10, 0) })
+            addView(btTamanho, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 10, 0) })
             addView(btInfo, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
         root.addView(barra, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 64) })
@@ -240,6 +255,7 @@ class MainActivity : AppCompatActivity() {
                 config.focusMode = Config.FocusMode.AUTO
                 config.updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
                 config.lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
+                config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL // usado pela área livre
             }
             onSessionUpdated = { _, frame -> aoAtualizar(frame) }
         }
@@ -257,6 +273,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun aoAtualizarSeguro(frame: Frame) {
         val sv = sceneView ?: return
+        ultimoFrame = frame
         for (img in frame.getUpdatedTrackables(AugmentedImage::class.java)) {
             if (img.trackingState != TrackingState.TRACKING) continue
             val cod = img.name
@@ -271,7 +288,7 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread { atualizarTextos() }
                 }
             )
-            val c = Colocado(node, img)
+            val c = Colocado(cod, node, { img.centerPose })
             sv.addChildNode(node) // filho direto da cena: a cena atualiza a pose dele a cada quadro
             colocados[cod] = c
             carregarModelo(cod, c)
@@ -303,14 +320,14 @@ class MainActivity : AppCompatActivity() {
         for (c in prontos) {
             val f = c.ficha ?: continue
             val s = c.escala(tamanhoReal)
-            val pose = c.imagem.centerPose
+            val pose = c.pose()
             for (item in f.itens) {
                 val t = tela(pose, item.ancora[0] * s, item.ancora[1] * s, item.ancora[2] * s) ?: continue
                 pontos += Etiquetas.Ponto(t.first, t.second, item)
             }
             val alto = (f.tamanho?.get(1) ?: (f.itens.maxOfOrNull { i -> i.ancora[1] } ?: 1f)) * s
             if (f.titulo.isNotBlank() || f.resumo.isNotEmpty()) tela(pose, 0f, alto, 0f)?.let { t ->
-                topos += Etiquetas.Topo(t.first, t.second, f.titulo.ifBlank { alvos[c.imagem.name]?.nome ?: "" }, f.resumo,
+                topos += Etiquetas.Topo(t.first, t.second, f.titulo.ifBlank { alvos[c.codigo]?.nome ?: "" }, f.resumo,
                     if (tamanhoReal) "Tamanho real (1:1)" else "Maquete 1:${f.escala}")
             }
         }
@@ -348,33 +365,98 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---------- Área livre (sem etiqueta) ----------
+    private fun escolherAreaLivre() {
+        val lista = alvos.values.sortedBy { it.nome.lowercase() }
+        if (lista.isEmpty()) { mostrarStatus("Nenhum modelo publicado ainda."); return }
+        val d = destaque?.let { alvos[it] }
+        when {
+            d != null -> entrarAreaLivre(d.codigo)
+            lista.size == 1 -> entrarAreaLivre(lista[0].codigo)
+            else -> androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Qual modelo colocar no chão?")
+                .setItems(lista.map { "${it.nome} · ${it.codigo}" }.toTypedArray()) { _, i -> entrarAreaLivre(lista[i].codigo) }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }
+    }
+
+    private fun entrarAreaLivre(cod: String) {
+        modoLivre = cod
+        sceneView?.planeRenderer?.isEnabled = true
+        etiquetas.tocarLivre = { x, y -> colocarNoChao(x, y) }
+        atualizarTextos()
+    }
+
+    private fun sairAreaLivre() {
+        modoLivre = null
+        sceneView?.planeRenderer?.isEnabled = false
+        etiquetas.tocarLivre = null
+        atualizarTextos()
+    }
+
+    /** Toque na tela: procura o chão detectado nesse ponto e coloca (ou muda de lugar) o modelo, de frente para a câmera. */
+    private fun colocarNoChao(x: Float, y: Float) {
+        val cod = modoLivre ?: return
+        val sv = sceneView ?: return
+        val frame = ultimoFrame ?: return
+        if (frame.camera.trackingState != TrackingState.TRACKING) { mostrarStatus("Mova o celular devagar para o AR reconhecer o ambiente."); return }
+        val hit = frame.hitTest(x, y).firstOrNull { h ->
+            val t = h.trackable
+            t is Plane && t.type == Plane.Type.HORIZONTAL_UPWARD_FACING && t.isPoseInPolygon(h.hitPose)
+        }
+        if (hit == null) { mostrarStatus("Ainda não reconheci o chão nesse ponto. Aponte para o piso, mova o celular devagar até aparecer a malha e toque nela."); return }
+        val p = hit.hitPose; val cam = frame.camera.pose
+        val ang = kotlin.math.atan2(cam.tx() - p.tx(), cam.tz() - p.tz()) // frente do modelo (+Z) voltada para a câmera
+        val pose = Pose(floatArrayOf(p.tx(), p.ty(), p.tz()), floatArrayOf(0f, kotlin.math.sin(ang / 2f), 0f, kotlin.math.cos(ang / 2f)))
+        val anchor = hit.trackable.createAnchor(pose)
+        val chave = "livre:$cod"
+        colocados.remove(chave)?.let { velho ->
+            runCatching { sv.removeChildNode(velho.node) }
+            runCatching { velho.ancora?.detach() }
+        }
+        val node = AnchorNode(engine = sv.engine, anchor = anchor)
+        sv.addChildNode(node)
+        val c = Colocado(cod, node, { anchor.pose }, livre = true, ancora = anchor)
+        colocados[chave] = c
+        carregarModelo(cod, c)
+        atualizarTextos()
+    }
+
     private var avisoErro = false
     private fun atualizarTextos() {
         if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) { runOnUiThread { atualizarTextos() }; return }
         if (sceneView == null) return
         val algum = colocados.values.any { it.modelo != null }
-        val vis = if (algum) android.view.View.VISIBLE else android.view.View.GONE
-        if (barra.visibility != vis) { barra.visibility = vis; barra.post { posicionarPaineis() } }
+        if (barra.visibility != android.view.View.VISIBLE) { barra.visibility = android.view.View.VISIBLE; barra.post { posicionarPaineis() } }
+        val visObj = if (algum) android.view.View.VISIBLE else android.view.View.GONE
+        if (btTamanho.visibility != visObj) { btTamanho.visibility = visObj; btInfo.visibility = visObj; barra.post { posicionarPaineis() } }
+        btLivre.text = if (modoLivre != null) "Concluir" else "Área livre"
         val escalas = colocados.values.mapNotNull { it.ficha?.escala }.distinct()
         btTamanho.text = if (tamanhoReal) "Ver maquete" + (if (escalas.size == 1) " 1:${escalas[0]}" else "") else "Tamanho real"
         val temFicha = colocados.values.any { it.ficha != null }
-        btInfo.text = if (mostrarInfo) "Ocultar informações" else "Mostrar informações"
+        btInfo.text = if (mostrarInfo) "Ocultar info" else "Mostrar info"
         btInfo.isEnabled = temFicha; btInfo.alpha = if (temFicha) 1f else 0.5f
-        val vistos = colocados.keys.map { alvos[it]?.nome ?: it }
+        val vistos = colocados.values.map { alvos[it.codigo]?.nome ?: it.codigo }
         val alvoDestaque = destaque?.let { alvos[it] }
+        val livreNome = modoLivre?.let { alvos[it]?.nome ?: it }
         status.text = when {
+            livreNome != null && colocados.values.none { it.livre && it.codigo == modoLivre } ->
+                "Área livre · $livreNome\nAponte para o chão e mova o celular devagar até aparecer a malha. Depois toque onde quer colocar."
             colocados.isEmpty() && alvoDestaque != null -> "Aponte para a etiqueta ${alvoDestaque.codigo} · ${alvoDestaque.nome}"
             colocados.isEmpty() && destaque != null -> "A etiqueta $destaque ainda não foi publicada. Mostrando as demais."
             colocados.isEmpty() -> "Aponte a câmera para uma etiqueta RackLab"
             colocados.values.any { it.carregando } -> "Carregando modelo… (${vistos.joinToString(", ")})"
-            else -> colocados.entries.joinToString("\n") { (cod, c) ->
-                (alvos[cod]?.nome ?: cod) + " · " + (if (tamanhoReal) "tamanho real" else "maquete 1:${c.ficha?.escala ?: 5}") +
-                    if (c.seguindo) "" else " · última posição (aponte para a etiqueta)"
+            else -> colocados.values.joinToString("\n") { c ->
+                (alvos[c.codigo]?.nome ?: c.codigo) + " · " + (if (tamanhoReal) "tamanho real" else "maquete 1:${c.ficha?.escala ?: 5}") +
+                    (if (c.livre) " · no chão" else "") + if (c.seguindo) "" else " · última posição (aponte para a etiqueta)"
             }
         }
         if (avisoErro) return
-        dica.text = if (colocados.isEmpty())
-            "${alvos.size} etiqueta(s) cadastrada(s). Chegue a cerca de 1 m da etiqueta, com boa luz, e mova o celular devagar."
+        dica.text = if (modoLivre != null)
+            "Toque no chão para colocar; toque em outro ponto para mudar de lugar. Toque em Concluir para esconder a malha."
+        else if (colocados.isEmpty())
+            "${alvos.size} etiqueta(s) cadastrada(s). Chegue a cerca de 1 m da etiqueta, com boa luz, e mova o celular devagar. Sem etiqueta? Toque em Área livre."
         else if (colocados.values.any { it.modelo != null } && !temFicha)
             "Este modelo foi publicado sem a ficha dos equipamentos. No RackLab, toque em Publicar no AR de novo para ver as informações."
         else if (mostrarInfo && temFicha) "Toque num balão para ver a ficha completa do equipamento. O objeto acompanha a etiqueta."
