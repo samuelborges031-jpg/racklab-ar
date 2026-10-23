@@ -1,0 +1,13 @@
+/.well-known/assetlinks.json
+  Content-Type: application/json
+  Access-Control-Allow-Origin: *
+
+/alvos.json
+  Cache-Control: no-cache
+
+/modelos/*
+  Cache-Control: no-cache
+  Access-Control-Allow-Origin: *
+
+/alvos/*
+  Cache-Control: no-cache

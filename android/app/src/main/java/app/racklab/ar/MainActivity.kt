@@ -72,7 +72,8 @@ import java.nio.ByteBuffer
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        const val BASE = "https://racklab-ar.netlify.app/"
+        /** Site do visualizador (Cloudflare Pages). QRs antigos do Netlify continuam aceitos (o host contém "racklab-ar"). */
+        const val BASE = "https://racklab-ar.pages.dev/"
         const val TAG = "RackLabAR"
     }
 
