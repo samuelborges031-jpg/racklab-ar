@@ -5,6 +5,11 @@ on:
     branches: [main]
     paths: ["android/**", ".github/workflows/android.yml"]
   workflow_dispatch:
+    inputs:
+      publicar_no_site:
+        description: "Publicar o APK na página de download do site (gasta 1 publicação do Netlify)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -46,7 +51,11 @@ jobs:
           name: racklab-ar-apk
           path: android/app/build/outputs/apk/release/*.apk
 
+      # Economia de publicações do Netlify: o APK só vai para o site quando pedido
+      # (botão "Run workflow" com a opção marcada, ou "[site]" na mensagem do commit).
+      # Nas demais compilações o APK fica só como artefato do GitHub e é entregue pelo chat.
       - name: Publicar APK no site (public/app)
+        if: ${{ inputs.publicar_no_site || contains(github.event.head_commit.message, '[site]') }}
         run: |
           cp android/app/build/outputs/apk/release/app-release.apk public/app/racklab-ar.apk
           date -u +"%Y-%m-%d %H:%M UTC · build ${GITHUB_RUN_NUMBER}" > public/app/versao.txt
