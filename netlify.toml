@@ -1,21 +1,14 @@
-# O site mudou para o Cloudflare Pages (racklab-ar.pages.dev).
-# O Netlify só redireciona, para os QR Codes já impressos continuarem funcionando.
 [build]
   publish = "public"
-
-# o app Android verifica este arquivo neste endereço: não pode redirecionar
-[[redirects]]
-  from = "/.well-known/*"
-  to = "/.well-known/:splat"
-  status = 200
-
-[[redirects]]
-  from = "/*"
-  to = "https://racklab-ar.pages.dev/:splat"
-  status = 301
-  force = true
+  # cada publicação gasta créditos do plano gratuito: só publica quando o site (public/) mudou
+  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- public/ netlify.toml"
 
 [[headers]]
   for = "/.well-known/assetlinks.json"
   [headers.values]
     Content-Type = "application/json"
+
+[[headers]]
+  for = "/alvos.json"
+  [headers.values]
+    Cache-Control = "no-cache"
